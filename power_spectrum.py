@@ -105,6 +105,15 @@ def fast_field(ps, size=32, d=2, fnl=0, fnl_potential=True):
         field -= mean(field, axis=tuple(range(1,d+1))).reshape([-1]+[1]*d)
     return field/std(field, axis=tuple(range(1,d+1))).reshape([-1]+[1]*d)
 
+def sdft(x,axes=None):
+    d = x.ndim-1
+    size = x.shape[-1]
+    n = x.shape[0]
+    if axes is None:
+        axes=tuple(range(1,d+1))
+    factor = size**(d/2)
+    return fft.fftn(x,axes=axes)/factor
+
 def iterable(obj):
     try:
         len(obj)
@@ -267,3 +276,8 @@ def renorm_count(x,fn,count=20):
             fk[ices]=fk[ices]*(fn(k[ices])/mean_p[i])**.5
     fk[0]=0
     return real(fft.fft2(fk.reshape((size,size))))
+
+
+
+def remove_linear():
+    pass
