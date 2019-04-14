@@ -124,7 +124,7 @@ def iterable(obj):
     except TypeError:
         return False
 
-def fast_gaussian(ps, size=32, d=2, fnl=0, fnl_potential=True):
+def fast_gaussian(ps, size=32, d=2, fnl=0, fnl_potential=True, constant_phase=False):
     n = len(ps(0))
     assert not size%2
     ls = size//2+1
@@ -133,6 +133,8 @@ def fast_gaussian(ps, size=32, d=2, fnl=0, fnl_potential=True):
     for i in range(2**d):
         specials = tuple([colon]+[((i//2**k)%2)*(size//2) for k in range(d)])
         field[specials] = randn(n)
+    if constant_phase:
+        field[:] = field[0].reshape([1]+shape[1:])
     k2 = zeros(shape)
     build_ps(k2,ps,size,d)
     field *= k2**.5
@@ -280,7 +282,7 @@ def renorm_count(x,fn,count=20):
     fk[0]=0
     return real(fft.fft2(fk.reshape((size,size))))
 
-def standardise_ps(x, standard, original=None, count=20):
+def standardise_ps(x, standard, originals=None, count=20, ps=False):
     n = x.shape[0]
     d = x.ndim-1
     size = x.shape[-1]
@@ -290,20 +292,33 @@ def standardise_ps(x, standard, original=None, count=20):
     x = (fft.rfftn(x, axes=axes)/factor).reshape((n,-1))
     f = abs(x)**2
     new = zeros([1]+shape[1:])
-    build_ps(new,lambda x: array([standard(x)]))
+    build_ps(new,lambda x: array([standard(x)]), size, d)
     new = new[0].flatten()
     if originals is not None:
         current = zeros(shape)
         build_ps(current, originals, size, d)
         current = current.reshape((n,-1))
     else:
+        k = zeros([1]+shape[1:])
+        build_ps(k,lambda x: array([x]), size, d)
+        k = k[0].flatten()
         indices,edges = bin_by_count(k, count)
         current = zeros(shape).reshape((n,-1))
-        for ind in indices:
-            current[:,ind] = mean(f[:,ind],axis=1).reshape((-1,1))
+        if ps:
+            nk = len(indices)
+            mps = zeros((n,nk))
+        for i,ind in enumerate(indices):
+            psi = mean(f[:,ind],axis=1)
+            current[:,ind] = psi.reshape((-1,1))
+            if ps:
+                mps[:,i] = psi
     x *= sqrt(new/current)
     x = x.reshape(shape)
-    return fft.irfftn(x,axes=axes)*factor                                                    
+    x[tuple([colon]+[0]*d)]=0
+    x = fft.irfftn(x,axes=axes)*factor
+    if ps:
+        return x,edges,mps
+    return x
 
 def triangle_plot(samples, labels=None, title=None, nbins=100, bounds=None, expected=None, truth=None, figsize=4):
     n = samples.shape[-1]
@@ -344,10 +359,10 @@ def triangle_plot(samples, labels=None, title=None, nbins=100, bounds=None, expe
             ax[i,0].set_ylabel(labels[i])
         #return f
 
-def corners(samples,bins=30,prenorm=False,**kwargs):
+def corners(samples,bins=30,prenorm=False,binned=False,**kwargs):
     if not iterable(bins):
         bins = linspace(amin(samples),amax(samples),bins+1)
-    counts = histogram(samples,bins,**kwargs)[0]
+    counts = samples if binned else histogram(samples,bins,**kwargs)[0]
     if prenorm:
         counts = counts/amax(counts)
     x,y = [bins[0]], [0]
@@ -389,6 +404,13 @@ class LFI(tf.estimator.Estimator):
             ax[-1,i].set_xlabel(self.labels[i])
         #return f
     
+    def plot_means(self, x, p, compare=None, **kwags):
+        raise NotImplementedError
+        testing_fn = testing_fn_generator(x,p)
+        means = [mean(m["samples"], axis=0) for m in self.predict(testing_fn)]
+        comparison = [compare(y) for y in x]
+                
+    
     def plot_posteriors(self, x, p, compare=None, **kwargs):
         testing_fn = testing_fn_generator(x,p)
         for i,m in enumerate(self.predict(testing_fn)):
@@ -416,6 +438,60 @@ class LFI(tf.estimator.Estimator):
             ax[i].set_xlabel("rank of truth among posterior samples")
         #return f
     
+    def plot_2d_means(self, x, p, bounds=None, cmap=matplotlib.cm.viridis, s=None):
+        n = len(x)
+        s = 3e4/n if s is None else s
+        means = array([mean(p["samples"],axis=0) for p in self.predict(testing_fn_generator(x, p))])
+        if bounds is None:
+            bounds = zeros((2,2))
+            bounds[0] = amin(means, axis=0)
+            bounds[1] = amax(means, axis=0)
+        if array(bounds).ndim == 1:
+            bounds = repeat(array(bounds).reshape(2,1), 2, axis=1)
+        f,ax = subplots(2,2,figsize=(12,6),gridspec_kw={"height_ratios": (1,20)})
+        norms = [matplotlib.colors.Normalize(vmin=bounds[0,i], vmax=bounds[1,i]) for i in [0,1]]
+        colours = [cmap(norms[i](means[:,i])) for i in [0,1]]
+        for i in [0,1]:
+            ax[1,i].scatter(p[:,0],p[:,1],c=colours[i],s=s,alpha=0.8)
+            ax[1,i].set_aspect("equal")
+            ax[1,i].set_xlabel(self.labels[0])
+            ax[1,i].set_ylabel(self.labels[1])
+            ax[0,i].set_title(self.labels[i])
+            matplotlib.colorbar.ColorbarBase(ax[0,i],orientation="horizontal",cmap=cmap,norm=norms[i])
+        suptitle("Mean posteriors")
+        #return f
+    
+    def plot_2d(self, x, p, bounds=None, cmap=matplotlib.cm.viridis, s=None):
+        n = len(x)
+        s = 3e4/n if s is None else s
+        data = array([[mean(p["samples"],axis=0),p["stat"]] for p in self.predict(testing_fn_generator(x, p))])
+        means, stats = data[:,0,:], data[:,1,:]
+        if bounds is None:
+            bounds = zeros((2,2))
+            bounds[0] = amin(means, axis=0)
+            bounds[1] = amax(means, axis=0)
+        if array(bounds).ndim == 1:
+            bounds = repeat(array(bounds).reshape(2,1), 2, axis=1)
+        f,ax = subplots(2,4,figsize=(21,6),gridspec_kw={"height_ratios": (1,20)})
+        norms = [matplotlib.colors.Normalize(vmin=bounds[0,i], vmax=bounds[1,i]) for i in [0,1]]
+        colours = [cmap(norms[i](means[:,i])) for i in [0,1]]
+        for i in [0,1]:
+            ax[1,i].scatter(p[:,0],p[:,1],c=colours[i],s=s,alpha=0.8)
+            ax[1,i].set_aspect("equal")
+            ax[1,i].set_xlabel(self.labels[0])
+            ax[1,i].set_ylabel(self.labels[1])
+            ax[0,i].set_title("mean "+self.labels[i])
+            matplotlib.colorbar.ColorbarBase(ax[0,i],orientation="horizontal",cmap=cmap,norm=norms[i])
+        norms = [matplotlib.colors.Normalize(vmin=amin(stats[:,i]), vmax=amax(stats[:,i])) for i in [0,1]]
+        colours = [cmap(norms[i](stats[:,i])) for i in [0,1]]
+        for i in [0,1]:
+            ax[1,i+2].scatter(p[:,0],p[:,1],c=colours[i],s=s,alpha=0.8)
+            ax[1,i+2].set_aspect("equal")
+            ax[1,i+2].set_xlabel(self.labels[0])
+            ax[1,i+2].set_ylabel(self.labels[1])
+            ax[0,i+2].set_title(f"summary statistic {i+1}")
+            matplotlib.colorbar.ColorbarBase(ax[0,i+2],orientation="horizontal",cmap=cmap,norm=norms[i])
+    
     def __init__(self,
                 feature_columns,
                 label_columns,
@@ -428,7 +504,8 @@ class LFI(tf.estimator.Estimator):
                 model_dir=None,
                 config=None,
                 n_samples = 2000,
-                model_fn=None):
+                model_fn=None,
+                cnn=True):
         
         if model_fn is not None:
             return tf.estimator.Estimator.__init__(self,model_fn=model_fn,
@@ -441,13 +518,17 @@ class LFI(tf.estimator.Estimator):
             # Builds the neural network
             size = features.shape[-1]
             d = len(features.shape)-1
+            assert not cnn or 1<=d<=3
             conv = tf.reshape(features,tuple([-1]+[size]*d+[1]))
             channels = 1
             width = size
+            if cnn:
+                conv_layer = [tf.layers.conv1d, tf.layers.conv2d, tf.layers.conv3d][d-1]
             while width > 1:
                 width //= 2
                 channels *= 2**d
-                conv = tf.layers.conv2d(conv, channels, 2, strides=2, activation=tf.nn.leaky_relu)
+                if cnn:
+                    conv = conv_layer(conv, channels, 2, strides=2, activation=tf.nn.leaky_relu)
             dense=tf.reshape(conv,(-1,channels))
             f = -int(-(channels/label_dimension)**.2)
             for i in range(3):
