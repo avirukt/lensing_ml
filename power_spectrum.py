@@ -5,6 +5,7 @@ from scipy.stats import binned_statistic,binom
 from matplotlib.pyplot import *
 import tensorflow as tf
 import tensorflow_probability as tfp
+from scipy.interpolate import LSQUnivariateSpline
 
 colon=slice(None)
 
@@ -304,6 +305,7 @@ def standardise_ps(x, standard, originals=None, count=20, ps=False, interpolate=
         k = zeros([1]+shape[1:])
         build_ps(k,lambda x: array([x]), size, d)
         k = k[0].flatten()
+        count = 1 if interpolate else count
         indices,edges = bin_by_count(k, count)
         current = zeros(shape).reshape((n,-1))
         nk = len(indices)
@@ -312,6 +314,14 @@ def standardise_ps(x, standard, originals=None, count=20, ps=False, interpolate=
             psi = mean(f[:,ind],axis=1)
             current[:,ind] = psi.reshape((-1,1))
             mps[:,i] = psi
+        if interpolate:
+            knots = array([1.25,2.5,5,10,15,20])/16/2**.5*size/2*d**.5
+            splines = []
+            for i in range(n):
+                splines.append(LSQUnivariateSpline(edges[1:],log(mps[i]),knots))
+            current = zeros(shape)
+            build_ps(current, lambda k: exp(array([s(k) for s in splines])), size, d)
+            current = current.reshape((n,-1))
     else:
         current = originals
     x *= sqrt(new/current)
@@ -319,7 +329,7 @@ def standardise_ps(x, standard, originals=None, count=20, ps=False, interpolate=
     x[tuple([colon]+[0]*d)]=0
     x = fft.irfftn(x,axes=axes)*factor
     if ps and originals is None:
-        return x,edges,(current if interpolate else mps)
+        return x,edges,(splines if interpolate else mps)
     return x
 
 def triangle_plot(samples, labels=None, title=None, nbins=100, bounds=None, expected=None, truth=None, figsize=4):
