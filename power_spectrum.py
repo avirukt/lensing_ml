@@ -124,6 +124,12 @@ def iterable(obj):
     except TypeError:
         return False
 
+def plot_2d_field(x,cbar=True):
+    m = amax(abs(x))
+    imshow(x, vmin=-m, vmax=m, cmap="bwr")
+    if cbar:
+        colorbar()
+
 def fast_gaussian(ps, size=32, d=2, fnl=0, fnl_potential=True, constant_phase=False):
     n = len(ps(0))
     assert not size%2
@@ -282,7 +288,7 @@ def renorm_count(x,fn,count=20):
     fk[0]=0
     return real(fft.fft2(fk.reshape((size,size))))
 
-def standardise_ps(x, standard, originals=None, count=20, ps=False):
+def standardise_ps(x, standard, originals=None, count=20, ps=False, interpolate=False):
     n = x.shape[0]
     d = x.ndim-1
     size = x.shape[-1]
@@ -294,30 +300,26 @@ def standardise_ps(x, standard, originals=None, count=20, ps=False):
     new = zeros([1]+shape[1:])
     build_ps(new,lambda x: array([standard(x)]), size, d)
     new = new[0].flatten()
-    if originals is not None:
-        current = zeros(shape)
-        build_ps(current, originals, size, d)
-        current = current.reshape((n,-1))
-    else:
+    if originals is None:
         k = zeros([1]+shape[1:])
         build_ps(k,lambda x: array([x]), size, d)
         k = k[0].flatten()
         indices,edges = bin_by_count(k, count)
         current = zeros(shape).reshape((n,-1))
-        if ps:
-            nk = len(indices)
-            mps = zeros((n,nk))
+        nk = len(indices)
+        mps = zeros((n,nk))
         for i,ind in enumerate(indices):
             psi = mean(f[:,ind],axis=1)
             current[:,ind] = psi.reshape((-1,1))
-            if ps:
-                mps[:,i] = psi
+            mps[:,i] = psi
+    else:
+        current = originals
     x *= sqrt(new/current)
     x = x.reshape(shape)
     x[tuple([colon]+[0]*d)]=0
     x = fft.irfftn(x,axes=axes)*factor
-    if ps:
-        return x,edges,mps
+    if ps and originals is None:
+        return x,edges,(current if interpolate else mps)
     return x
 
 def triangle_plot(samples, labels=None, title=None, nbins=100, bounds=None, expected=None, truth=None, figsize=4):
@@ -373,14 +375,14 @@ def corners(samples,bins=30,prenorm=False,binned=False,**kwargs):
     y += [0]
     return x,y
 
-def training_fn_generator(x,p,batch_size=32,buffer=1000):
+def training_fn_generator(x,p,batch_size=128,buffer=1000):
     def f():
         dataset = tf.data.Dataset.from_tensor_slices((x.astype('float32'), p.astype('float32')))
         dataset = dataset.repeat().shuffle(buffer).batch(batch_size)
         return dataset
     return f
 
-def testing_fn_generator(x,p,batch_size=32):
+def testing_fn_generator(x,p,batch_size=128):
     def f():
         dataset = tf.data.Dataset.from_tensor_slices((x.astype('float32'), p.astype('float32')))
         dataset = dataset.batch(batch_size)
@@ -426,7 +428,9 @@ class LFI(tf.estimator.Estimator):
             ranks[i] = sum(m["samples"]<p[i].reshape((1,-1)),axis=0)
         if nbins is None:
             nbins = int(N**.5)
-        f,ax = subplots(n,1,figsize=(figsize,2/3*figsize*n))
+        while self.n_samples%nbins:
+            nbins += 1
+        f,ax = subplots(n,1,figsize=(figsize,2/3*figsize*n),gridspec_kw={"hspace": 0.3})
         if n==1:
             ax=[ax]
         interval = binom.interval(0.9, N, 1/nbins)
@@ -531,11 +535,9 @@ class LFI(tf.estimator.Estimator):
                     conv = conv_layer(conv, channels, 2, strides=2, activation=tf.nn.leaky_relu)
             dense=tf.reshape(conv,(-1,channels))
             f = -int(-(channels/label_dimension)**.2)
-            for i in range(3):
+            for i in range(4):
                 channels //= f
                 dense = tf.contrib.layers.fully_connected(tf.layers.dropout(dense,rate=dropout,training=training),channels,activation_fn=tf.nn.leaky_relu)
-            channels //= f
-            dense = tf.contrib.layers.fully_connected(tf.layers.dropout(dense,rate=dropout,training=training),channels,activation_fn=tf.nn.tanh)
             stat = tf.contrib.layers.fully_connected(tf.layers.dropout(dense,rate=dropout,training=training),label_dimension)
             
             net = tf.contrib.layers.fully_connected(stat, 128, activation_fn=tf.nn.tanh)
